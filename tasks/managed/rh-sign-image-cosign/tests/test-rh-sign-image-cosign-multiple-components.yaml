@@ -198,33 +198,32 @@ spec:
               test "$CALLS" = "$EXPECTED"
 
               CALLS=$(cat "$(params.dataDir)/mock_cosign_sign_calls")
-              COSIGN_COMMON="-t 3m0s sign -y --rekor-url=https://fake-rekor-server --key aws://arn:mykey \
-              --sign-container-identity"
+              COSIGN_COMMON="-t 3m0s sign -y --rekor-url=https://fake-rekor-server --key aws://arn:mykey"
+              IDENTITY1="--sign-container-identity \"${_TEST_PUB_REPO1}:t1\""
+              IDENTITY2="--sign-container-identity \"${_TEST_PUB_REPO2}:t1\""
+              IDENTITY3="--sign-container-identity \"${_TEST_PUB_REPO3}:t1\""
+
+              IDENTITY12="--sign-container-identity \"${_TEST_PUB_REPO1}:t2\""
+              IDENTITY22="--sign-container-identity \"${_TEST_PUB_REPO2}:t2\""
+              IDENTITY32="--sign-container-identity \"${_TEST_PUB_REPO3}:t2\""
+
               EXPECTED=$(cat <<EOF
-              $COSIGN_COMMON ${_TEST_PUB_REPO1}:t1 ${_TEST_REPO1}@sha256:0000-1
-              $COSIGN_COMMON ${_TEST_PUB_REPO1}:t1 ${_TEST_REPO1}@sha256:0000-2
-              $COSIGN_COMMON ${_TEST_PUB_REPO1}:t1 ${_TEST_REPO1}@sha256:0000-3
-              $COSIGN_COMMON ${_TEST_PUB_REPO1}:t1 ${_TEST_REPO1}@sha256:0000
-              $COSIGN_COMMON ${_TEST_PUB_REPO3}:t1 ${_TEST_REPO2}@sha256:1111-1
-              $COSIGN_COMMON ${_TEST_PUB_REPO3}:t1 ${_TEST_REPO2}@sha256:1111-2
-              $COSIGN_COMMON ${_TEST_PUB_REPO3}:t1 ${_TEST_REPO2}@sha256:1111-3
-              $COSIGN_COMMON ${_TEST_PUB_REPO3}:t1 ${_TEST_REPO2}@sha256:1111
-              $COSIGN_COMMON ${_TEST_PUB_REPO1}:t2 ${_TEST_REPO1}@sha256:0000-1
-              $COSIGN_COMMON ${_TEST_PUB_REPO1}:t2 ${_TEST_REPO1}@sha256:0000-2
-              $COSIGN_COMMON ${_TEST_PUB_REPO1}:t2 ${_TEST_REPO1}@sha256:0000-3
-              $COSIGN_COMMON ${_TEST_PUB_REPO1}:t2 ${_TEST_REPO1}@sha256:0000
-              $COSIGN_COMMON ${_TEST_PUB_REPO3}:t2 ${_TEST_REPO2}@sha256:1111-1
-              $COSIGN_COMMON ${_TEST_PUB_REPO3}:t2 ${_TEST_REPO2}@sha256:1111-2
-              $COSIGN_COMMON ${_TEST_PUB_REPO3}:t2 ${_TEST_REPO2}@sha256:1111-3
-              $COSIGN_COMMON ${_TEST_PUB_REPO3}:t2 ${_TEST_REPO2}@sha256:1111
-              $COSIGN_COMMON ${_TEST_PUB_REPO2}:t1 ${_TEST_REPO1}@sha256:0000-1
-              $COSIGN_COMMON ${_TEST_PUB_REPO2}:t1 ${_TEST_REPO1}@sha256:0000-2
-              $COSIGN_COMMON ${_TEST_PUB_REPO2}:t1 ${_TEST_REPO1}@sha256:0000-3
-              $COSIGN_COMMON ${_TEST_PUB_REPO2}:t1 ${_TEST_REPO1}@sha256:0000
-              $COSIGN_COMMON ${_TEST_PUB_REPO2}:t2 ${_TEST_REPO1}@sha256:0000-1
-              $COSIGN_COMMON ${_TEST_PUB_REPO2}:t2 ${_TEST_REPO1}@sha256:0000-2
-              $COSIGN_COMMON ${_TEST_PUB_REPO2}:t2 ${_TEST_REPO1}@sha256:0000-3
-              $COSIGN_COMMON ${_TEST_PUB_REPO2}:t2 ${_TEST_REPO1}@sha256:0000
+              $COSIGN_COMMON ${IDENTITY2} ${IDENTITY1} ${_TEST_REPO1}@sha256:0000-1
+              $COSIGN_COMMON ${IDENTITY2} ${IDENTITY1} ${_TEST_REPO1}@sha256:0000-2
+              $COSIGN_COMMON ${IDENTITY2} ${IDENTITY1} ${_TEST_REPO1}@sha256:0000-3
+              $COSIGN_COMMON ${IDENTITY2} ${IDENTITY1} ${_TEST_REPO1}@sha256:0000
+              $COSIGN_COMMON ${IDENTITY3} ${_TEST_REPO2}@sha256:1111-1
+              $COSIGN_COMMON ${IDENTITY3} ${_TEST_REPO2}@sha256:1111-2
+              $COSIGN_COMMON ${IDENTITY3} ${_TEST_REPO2}@sha256:1111-3
+              $COSIGN_COMMON ${IDENTITY3} ${_TEST_REPO2}@sha256:1111
+              $COSIGN_COMMON ${IDENTITY22} ${IDENTITY12} ${_TEST_REPO1}@sha256:0000-1
+              $COSIGN_COMMON ${IDENTITY22} ${IDENTITY12} ${_TEST_REPO1}@sha256:0000-2
+              $COSIGN_COMMON ${IDENTITY22} ${IDENTITY12} ${_TEST_REPO1}@sha256:0000-3
+              $COSIGN_COMMON ${IDENTITY22} ${IDENTITY12} ${_TEST_REPO1}@sha256:0000
+              $COSIGN_COMMON ${IDENTITY32} ${_TEST_REPO2}@sha256:1111-1
+              $COSIGN_COMMON ${IDENTITY32} ${_TEST_REPO2}@sha256:1111-2
+              $COSIGN_COMMON ${IDENTITY32} ${_TEST_REPO2}@sha256:1111-3
+              $COSIGN_COMMON ${IDENTITY32} ${_TEST_REPO2}@sha256:1111
               EOF
               )
               echo "TESTING"
@@ -257,14 +256,6 @@ spec:
               $COSIGN_COMMON ${_TEST_REPO2}@sha256:1111-2
               $COSIGN_COMMON ${_TEST_REPO2}@sha256:1111-3
               $COSIGN_COMMON ${_TEST_REPO2}@sha256:1111
-              $COSIGN_COMMON ${_TEST_REPO1}@sha256:0000-1
-              $COSIGN_COMMON ${_TEST_REPO1}@sha256:0000-2
-              $COSIGN_COMMON ${_TEST_REPO1}@sha256:0000-3
-              $COSIGN_COMMON ${_TEST_REPO1}@sha256:0000
-              $COSIGN_COMMON ${_TEST_REPO1}@sha256:0000-1
-              $COSIGN_COMMON ${_TEST_REPO1}@sha256:0000-2
-              $COSIGN_COMMON ${_TEST_REPO1}@sha256:0000-3
-              $COSIGN_COMMON ${_TEST_REPO1}@sha256:0000
               EOF
               )
               echo "TESTING VERIFY CALLS"

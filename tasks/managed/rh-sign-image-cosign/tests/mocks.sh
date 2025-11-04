@@ -139,6 +139,8 @@ function skopeo() {
 function mktemp() {
   if [[ "${1:-}" == "-d" ]]; then
     /usr/bin/mktemp -d
+  elif [[ "${1:-}" == "--suffix" ]]; then
+    /usr/bin/mktemp "$@"
   else
     echo "temp_key_file"
   fi

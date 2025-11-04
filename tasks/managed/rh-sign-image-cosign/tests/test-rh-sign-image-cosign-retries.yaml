@@ -177,10 +177,10 @@ spec:
               CALLS=$(cat "$(params.dataDir)/mock_cosign_sign_calls")
               COSIGN_COMMON="-t 3m0s sign --tlog-upload=false --key aws://arn:mykey --sign-container-identity"
               EXPECTED=$(cat <<EOF
-              $COSIGN_COMMON ${_TEST_PUB_REPO}:t1 ${_TEST_REPO}@sha256:2222
-              $COSIGN_COMMON ${_TEST_PUB_REPO}:t2 ${_TEST_REPO}@sha256:2222
+              $COSIGN_COMMON "${_TEST_PUB_REPO}:t1" ${_TEST_REPO}@sha256:2222
+              $COSIGN_COMMON "${_TEST_PUB_REPO}:t2" ${_TEST_REPO}@sha256:2222
               - SIMULATED ERROR -
-              $COSIGN_COMMON ${_TEST_PUB_REPO}:t2 ${_TEST_REPO}@sha256:2222
+              $COSIGN_COMMON "${_TEST_PUB_REPO}:t2" ${_TEST_REPO}@sha256:2222
               EOF
               )
               echo "TESTING"

@@ -85,7 +85,7 @@ spec:
               done
 
               # Setup cosign success calls (verify + sign for each operation)
-              for _ in $(seq 1 32); do
+              for _ in $(seq 1 16); do
                   echo "1" >> "$(params.dataDir)/mock_cosign_success_calls"
               done
 
@@ -173,7 +173,7 @@ spec:
               REMAINING_CALLS=$(wc -l < "$(params.dataDir)/mock_cosign_success_calls" || echo 0)
 
               if [ "$REMAINING_CALLS" -ne 0 ]; then
-                echo "Expected all cosign calls to be consumed, but $REMAINING_CALLS calls remain"
+                echo "Expected all (16) cosign calls to be consumed, but $REMAINING_CALLS calls remain"
                 exit 1
               fi
 
