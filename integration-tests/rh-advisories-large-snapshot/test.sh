@@ -2,27 +2,15 @@
 #
 # rh-advisories-large-snapshot test script
 #
-# INFRASTRUCTURE REQUIREMENTS:
-# - Cluster: stg-rh01 (staging cluster)
-# - Tenant Namespace (execution context varies):
-#   * PaC runs (triggered by /test-large-snapshot): rhtap-release-2-tenant
-#   * Local runs (../run-test.sh): dev-release-team-tenant (default, see test.env)
-#   * Can be overridden for local runs: export tenant_namespace=rhtap-release-2-tenant
-# - Managed Namespace: managed-release-team-tenant (same for all runs)
-# - Required Secrets (in tenant namespace):
-#   * vault-password-secret: Ansible vault password for decrypting test secrets
-#   * github-token-secret: GitHub PAT with repo permissions
-#   * kubeconfig-secret: Kubeconfig for cluster access
-# - Required Permissions:
-#   * Resource creation/deletion in both namespaces
-#   * ServiceAccount with release pipeline execution permissions
-#   * Access to pre-configured ReleasePlanAdmission
+# LARGE SNAPSHOT TEST SPECIFICS:
+# - Tests rh-advisories pipeline with ~200 pre-built components
+# - Expected duration: 4-8 hours (not a failure)
+# - Skips: Component builds, idempotency checks
+# - Uses: Staging Pyxis (stage) and staging signing (staging-redhatbeta2)
+# - Trigger: Comment `/test-large-snapshot` on PRs (manual only)
 #
-# IMPORTANT: Namespace configuration is intentionally different for isolation:
-# - PaC runs execute in the namespace where the PipelineRun is created
-# - Local runs default to a separate tenant for development/debugging
-# - Both namespaces must have identical secret and RPA configurations
-# Contact the Release Service team for access or infrastructure questions.
+# For general test infrastructure and requirements, see:
+#   integration-tests/README.md (common setup, cluster architecture, secrets)
 #
 # --- Global Script Variables (Defaults) ---
 CLEANUP="true"
@@ -37,27 +25,40 @@ SNAPSHOT_READY_POLL_INTERVAL="${SNAPSHOT_READY_POLL_INTERVAL:-2}"
 RELEASE_START_TIMEOUT="${RELEASE_START_TIMEOUT:-600}"
 RELEASE_START_POLL_INTERVAL="${RELEASE_START_POLL_INTERVAL:-5}"
 
-# Default OpenShift console URL for staging cluster (stg-rh01)
-# This is the expected cluster for this test - can be overridden via environment variable
-DEFAULT_CONSOLE_URL="${DEFAULT_CONSOLE_URL:-https://console-openshift-console.apps.stone-stg-rh01.l2vh.p1.openshiftapps.com}"
-
-# Get OpenShift console URL from cluster (or use default)
-# Priority: 1. CONSOLE_URL env var, 2. PaC ConfigMap, 3. DEFAULT_CONSOLE_URL
+# Get OpenShift console URL from cluster (dynamic detection)
+# Priority: 1. CONSOLE_URL env var, 2. oc whoami --show-console, 3. PaC ConfigMap
+# Consistent with other e2e tests - no hardcoded fallback URLs
 if [ -z "${CONSOLE_URL:-}" ]; then
-    # Attempt to fetch from PaC ConfigMap (defensive: validate output)
-    pac_console_url=$(kubectl get cm/pipelines-as-code -n openshift-pipelines -ojson 2>/dev/null | jq -r '.data."custom-console-url" // empty' 2>/dev/null || echo "")
-
+    # Try to get console URL dynamically from current cluster context
+    # This ensures we get the correct URL for whatever cluster we're actually connected to
+    dynamic_console_url=""
+    
+    if command -v oc &> /dev/null; then
+        dynamic_console_url=$(oc whoami --show-console 2>/dev/null || echo "")
+    fi
+    
     # Validate that we got a URL (must start with http:// or https://)
-    if [[ "${pac_console_url}" =~ ^https?:// ]]; then
-        CONSOLE_URL="${pac_console_url}"
-        echo "📍 Using console URL from PaC ConfigMap: ${CONSOLE_URL}" >&2
+    if [[ "${dynamic_console_url}" =~ ^https?:// ]]; then
+        CONSOLE_URL="${dynamic_console_url}"
+        echo "📍 Using console URL from cluster (oc whoami): ${CONSOLE_URL}" >&2
     else
-        # Fall back to default if ConfigMap value is invalid or unavailable
-        CONSOLE_URL="${DEFAULT_CONSOLE_URL}"
-        echo "📍 Using default console URL: ${CONSOLE_URL}" >&2
+        # Fall back to PaC ConfigMap if oc command failed or not available
+        pac_console_url=$(kubectl get cm/pipelines-as-code -n openshift-pipelines -ojson 2>/dev/null | jq -r '.data."custom-console-url" // empty' 2>/dev/null || echo "")
+
+        # Validate that we got a URL (must start with http:// or https://)
+        if [[ "${pac_console_url}" =~ ^https?:// ]]; then
+            CONSOLE_URL="${pac_console_url}"
+            echo "📍 Using console URL from PaC ConfigMap: ${CONSOLE_URL}" >&2
+        else
+            # Could not detect console URL - URLs in output may be incomplete
+            CONSOLE_URL=""
+            echo "⚠️  WARNING: Could not detect console URL dynamically" >&2
+            echo "   PipelineRun URLs in output may be incomplete" >&2
+            echo "   To fix: Export CONSOLE_URL or ensure 'oc' CLI is available" >&2
+        fi
     fi
 else
-    echo "📍 Using console URL from environment: ${CONSOLE_URL}" >&2
+    echo "📍 Using console URL from environment variable: ${CONSOLE_URL}" >&2
 fi
 
 # Ensure CONSOLE_URL has trailing slash for URL construction
@@ -76,6 +77,7 @@ fi
 #   - Release config: release_plan_name, release_plan_admission_name
 #   - Catalog references: RELEASE_CATALOG_GIT_URL, RELEASE_CATALOG_GIT_REVISION
 #   - Timeout config: LARGE_SNAPSHOT_TIMEOUT
+#   - Note: PYXIS_SERVER and SIGNING_ENV are hardcoded in test.sh (not interpolated)
 #
 # When adding new variables:
 #   1. Ensure they don't conflict with Ansible vault syntax ($ANSIBLE_VAULT)

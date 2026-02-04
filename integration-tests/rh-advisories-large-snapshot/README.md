@@ -1,5 +1,95 @@
 # rh-advisories-large-snapshot test
 
+## Overview
+
+This test validates the rh-advisories pipeline with a large snapshot (~200 components) to ensure it can handle production-scale workloads. The test uses pre-built container images to skip the build phase and focus on advisory creation and processing at scale.
+
+### Infrastructure Architecture
+
+**IMPORTANT: Understanding the Two-Cluster Setup**
+
+This test follows the standard e2e test architecture with execution split across two clusters:
+
+1. **PaC Execution Cluster**: Production (stone-prd-rh01)
+   - Where: `rhtap-release-2-tenant` namespace
+   - Purpose: PipelineRun execution controlled by PaC
+   - Contains: The test orchestration and kubeconfig-secret
+
+2. **Test Target Cluster**: Staging (stone-stg-rh01) 
+   - Where: `dev-release-team-tenant` / `managed-release-team-tenant` namespaces
+   - Purpose: Where actual test resources are created and release pipelines run
+   - Uses: Staging Pyxis server and staging signing configuration
+   - Connection: Via kubeconfig-secret from production cluster
+
+#### Why PaC Runs on Production (But Test is Still Safe)
+
+**The Constraint:**
+The `release-service-catalog` repository and its PaC configuration live on the **production cluster** 
+(stone-prd-rh01). This is a Konflux/RHTAP organizational decision - all catalog repositories are 
+hosted on production infrastructure for stability and availability.
+
+**Why It Must Run on Production:**
+- PaC (Pipelines as Code) executes in the cluster where the Git repository is registered
+- The repository cannot be moved to staging without significant infrastructure changes
+- This affects ALL e2e tests in this repository, not just this one
+
+**What Changed (This Test vs. Reality):**
+- **What it looks like**: PaC runs on production → sounds scary! 🚨
+- **What actually happens**: PaC on production is just the **orchestration layer**
+  - The PipelineRun pod runs on production (minimal resource usage)
+  - The test script inside that pod connects to **staging** via kubeconfig
+  - All actual work (resources, pipelines, Pyxis calls) happens on **staging**
+
+**Analogy:** Think of it like a remote control:
+- Remote control (PaC): Lives on your production shelf
+- The device being controlled (test execution): Runs in your staging room
+- No production TV gets changed when you press buttons!
+
+**Why This Separation?**
+- The `release-service-catalog` repository lives on production cluster
+- PaC triggers run where the repository is hosted (production)
+- Tests safely execute against staging infrastructure via kubeconfig
+- This prevents any accidental impact to production services
+
+**Safety Guarantees:**
+- ✅ No production Pyxis server interaction (uses stage Pyxis)
+- ✅ No production signing operations (uses staging signing config)
+- ✅ No production cluster resource creation (creates in staging)
+- ✅ Safe to run repeatedly without external side effects
+
+**Precautions & Expectations:**
+- **Resource Cleanup**: Test automatically cleans up resources on completion/cancellation
+  - Deletes GitHub test repositories
+  - Removes Kubernetes resources from staging cluster
+  - Cleanup runs even on test failure (via trap handlers)
+- **Rate Limits**: Test creates ~200 components, respects staging cluster quotas
+  - May consume significant staging cluster resources during 4-8 hour run
+  - Does NOT impact production rate limits (staging Pyxis, staging signing)
+- **Concurrent Runs**: Multiple instances can run simultaneously
+  - Each test generates unique resource names (UUID-based)
+  - No conflicts between concurrent test executions
+- **Test Duration**: 4-8 hours is normal for ~200 components
+  - Not a failure - this is expected for large snapshot processing
+  - PipelineRun timeout configured to 8h0m0s
+- **Production Cluster Impact**: Minimal (only PipelineRun orchestration pod)
+  - No production services called
+  - No production cluster resources created beyond the PipelineRun itself
+
+### Environment Terminology Clarification
+
+**IMPORTANT:** This test uses different terminology for different components:
+
+| Component | Value | Configurable? | Meaning |
+|-----------|-------|---------------|---------|
+| **OpenShift Cluster** | `stone-stg-rh01` | ❌ Hardcoded | Physical cluster where test runs |
+| **Pyxis Server** | `stage` | ❌ Hardcoded | Pyxis staging API endpoint |
+| **Signing Config** | `staging-redhatbeta2` | ❌ Hardcoded | Staging signing keys/certificates |
+
+**Key Points:**
+- **All configuration hardcoded:** Cluster, Pyxis, and signing are fixed to staging
+- **Consistent with other tests:** Matches the pattern of all e2e tests in this repository
+- **Production not supported:** This test only works on staging infrastructure
+
 ## Setup
 
 ### Dependencies
@@ -32,17 +122,30 @@
   - The release service catalog revision to use in the RPA
   - This is provided when testing PRs
 ### Optional Environment Variables
-- KUBECONFIG
+
+#### Additional Configuration
+
+**Note:** This test uses hardcoded staging configuration:
+- **Pyxis Server:** `stage` (staging Pyxis API)
+- **Signing Config:** `staging-redhatbeta2` (staging signing keys)
+- **Cluster:** `stg-rh01` (staging cluster)
+- **Namespaces:** `dev-release-team-tenant` (local) / `rhtap-release-2-tenant` (PaC)
+
+This is consistent with all other e2e tests in this repository.
+
+- **KUBECONFIG**
   - The KUBECONFIG file to used to login to the target cluster
   - This is provided when testing PRs
-- DEFAULT_CONSOLE_URL
-  - Default OpenShift console URL (defaults to stg-rh01 staging cluster)
-  - Override to use a different cluster console for PipelineRun links
-  - Default: `https://console-openshift-console.apps.stone-stg-rh01.l2vh.p1.openshiftapps.com`
-- CONSOLE_URL
+  
+- **CONSOLE_URL**
   - OpenShift console URL for generating PipelineRun links
-  - Auto-detected from PaC ConfigMap, falls back to DEFAULT_CONSOLE_URL
-  - Override for custom cluster console URLs
+  - **Auto-detected** from current cluster (recommended - always correct!)
+  - Detection priority:
+    1. `CONSOLE_URL` env var (explicit override)
+    2. `oc whoami --show-console` (dynamic from current cluster)
+    3. PaC ConfigMap `custom-console-url` (when running in PaC)
+  - **Benefit**: Dynamic detection ensures generated links always point to the correct cluster console
+  - **Consistent**: Same approach as all other e2e tests (no hardcoded URLs)
 
 ### Test Properties
 #### [test.env](test.env)
@@ -63,24 +166,42 @@
 
 ### Running the test
 
+#### Via Pull Request (Recommended)
+
 This test can be triggered manually via PR comment:
 
 ```
 /test-large-snapshot
 ```
 
-Comment on any PR. The PaC configuration ([.tekton/rh-advisories-large-snapshot.yaml](../../.tekton/rh-advisories-large-snapshot.yaml)) 
+Comment on any PR in the `release-service-catalog` repository. The PaC configuration 
+([.tekton/rh-advisories-large-snapshot.yaml](../../.tekton/rh-advisories-large-snapshot.yaml)) 
 will trigger the Tekton pipeline automatically.
 
-The pipeline runs in the cluster and uses existing Kubernetes secrets (vault-password-secret, github-token-secret, kubeconfig-secret).
+**No Special Approval Required:** This test safely runs against staging infrastructure and does not 
+require additional approvals or confirmations.
 
-For local testing:
+**Expected Duration:** 4-8 hours due to processing ~200 components.
+
+**What Happens:**
+1. PipelineRun starts in `rhtap-release-2-tenant` on production cluster
+2. Test connects to staging cluster via kubeconfig-secret
+3. Creates test resources on staging cluster
+4. Executes release pipeline with staging Pyxis/signing
+5. Validates advisory creation and processing at scale
+
+#### Local Testing
+
+For local development and debugging:
 
 ```shell
 ../run-test.sh rh-advisories-large-snapshot
 ```
 
-**Note:** This test takes 4-8 hours to complete due to processing a large number of components (default: 200).
+**Prerequisites:**
+- KUBECONFIG with access to staging cluster (stone-stg-rh01)
+- Required environment variables (see "Required Environment Variables" section)
+- Access to staging cluster namespaces
 
 #### Namespace Configuration for Local Runs
 
@@ -98,6 +219,14 @@ export tenant_namespace=rhtap-release-2-tenant
 - Required secrets must be configured: `vault-password-secret`, `github-token-secret`, `kubeconfig-secret`
 - Your ServiceAccount must have permissions to create resources in both tenant and managed namespaces
 - The ReleasePlanAdmission must be configured in the managed namespace
+
+- **Approval from Release Service team** for non-standard environments
+
+**Important:** Pyxis and signing configuration are **hardcoded to staging** and cannot be changed. This test always uses:
+- Pyxis: `stage` (staging Pyxis API)
+- Signing: `staging-redhatbeta2` (staging signing keys)
+
+This ensures safe testing and is consistent with all other e2e tests in this repository.
 
 ### Debugging
 
