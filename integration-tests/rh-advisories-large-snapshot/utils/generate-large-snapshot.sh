@@ -98,13 +98,6 @@ for (( i=1; i<=COMPONENT_COUNT; i++ )); do
           url: ${SOURCE_URL}
           revision: main
 EOF
-
-    # Add some components with additional metadata for realism
-    if (( i % 20 == 0 )); then
-        cat <<EOF
-      repository: quay.io/redhat-pending/rhtap----${COMPONENT_NAME}
-EOF
-    fi
 done
 
 echo "" >&2

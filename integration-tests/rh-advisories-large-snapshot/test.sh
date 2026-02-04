@@ -22,7 +22,7 @@ SNAPSHOT_READY_TIMEOUT="${SNAPSHOT_READY_TIMEOUT:-60}"
 SNAPSHOT_READY_POLL_INTERVAL="${SNAPSHOT_READY_POLL_INTERVAL:-2}"
 
 # Time to wait for release to start processing
-RELEASE_START_TIMEOUT="${RELEASE_START_TIMEOUT:-600}"
+RELEASE_START_TIMEOUT="${RELEASE_START_TIMEOUT:-600}"  # 10 minutes
 RELEASE_START_POLL_INTERVAL="${RELEASE_START_POLL_INTERVAL:-5}"
 
 # Get OpenShift console URL from cluster (dynamic detection)
@@ -372,10 +372,11 @@ check_release_processing() {
     : "${release_name:?release_name parameter is required}"
     : "${namespace:?namespace parameter is required}"
 
-    local status
-    status=$(kubectl get release "${release_name}" -n "${namespace}" \
-        -o jsonpath='{.status.conditions[?(@.type=="Processing")].status}' 2>/dev/null || echo "")
-    [ "$status" == "True" ]
+    # Check if release has started processing by looking for managedProcessing.pipelineRun
+    local pipelinerun
+    pipelinerun=$(kubectl get release "${release_name}" -n "${namespace}" \
+        -o jsonpath='{.status.managedProcessing.pipelineRun}' 2>/dev/null || echo "")
+    [ -n "$pipelinerun" ] && [ "$pipelinerun" != "null" ]
 }
 
 # Function to wait for release to start processing
@@ -390,6 +391,32 @@ wait_for_release_to_start() {
 
     local release_name="${large_snapshot_name}-release"
 
+    echo "🔍 Checking Release configuration..." >&2
+    echo "  Release: ${release_name}" >&2
+    echo "  Namespace: ${tenant_namespace}" >&2
+    
+    # Display Release spec for debugging
+    local release_spec
+    release_spec=$(kubectl get release "${release_name}" -n "${tenant_namespace}" -o json 2>/dev/null)
+    if [ -n "$release_spec" ]; then
+        echo "  Snapshot: $(echo "$release_spec" | jq -r '.spec.snapshot')" >&2
+        echo "  ReleasePlan: $(echo "$release_spec" | jq -r '.spec.releasePlan')" >&2
+    fi
+    
+    # Check ReleasePlan configuration
+    local release_plan_name
+    release_plan_name=$(echo "$release_spec" | jq -r '.spec.releasePlan')
+    if [ -n "$release_plan_name" ] && [ "$release_plan_name" != "null" ]; then
+        echo "🔍 Checking ReleasePlan: ${release_plan_name}..." >&2
+        local rp_info
+        rp_info=$(kubectl get releaseplan "${release_plan_name}" -n "${tenant_namespace}" -o json 2>/dev/null)
+        if [ -n "$rp_info" ]; then
+            echo "  Application: $(echo "$rp_info" | jq -r '.spec.application')" >&2
+            echo "  Target: $(echo "$rp_info" | jq -r '.spec.target')" >&2
+            echo "  Labels: $(echo "$rp_info" | jq -r '.metadata.labels')" >&2
+        fi
+    fi
+
     # Wait for release Processing condition using polling helper
     wait_for_condition \
         "release ${release_name} to start processing" \
@@ -400,6 +427,32 @@ wait_for_release_to_start() {
         "${tenant_namespace}"
     if [ $? -ne 0 ]; then
         echo "❌ Release did not start processing within ${RELEASE_START_TIMEOUT}s" >&2
+        echo "🔍 Debugging release-service controller state..." >&2
+        
+        # Check if Release has any error conditions
+        local release_conditions
+        release_conditions=$(kubectl get release "${release_name}" -n "${tenant_namespace}" \
+            -o jsonpath='{.status.conditions}' 2>/dev/null || echo "")
+        if [ -n "$release_conditions" ] && [ "$release_conditions" != "null" ]; then
+            echo "  Release conditions: ${release_conditions}" >&2
+        else
+            echo "  ⚠️  No status conditions set on Release (controller may not be watching)" >&2
+        fi
+        
+        # Check if there are any events related to the Release
+        echo "🔍 Recent events for Release:" >&2
+        kubectl get events -n "${tenant_namespace}" \
+            --field-selector involvedObject.name="${release_name}" \
+            --sort-by='.lastTimestamp' 2>/dev/null | tail -n 10 >&2 || true
+        
+        # Check ReleasePlanAdmission in target namespace
+        echo "🔍 Checking ReleasePlanAdmission in ${managed_namespace}:" >&2
+        kubectl get releaseplanadmission -n "${managed_namespace}" \
+            -l originating-tool="${originating_tool}" 2>/dev/null >&2 || true
+        
+        echo "🔍 Full Release YAML:" >&2
+        kubectl get release "${release_name}" -n "${tenant_namespace}" -o yaml >&2 || true
+        
         return 1
     fi
 
