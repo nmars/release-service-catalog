@@ -307,6 +307,62 @@ spec:
                 echo "Updated managed RoleBinding"
               fi
               
+              # Fix ServiceAccount to include trusted artifacts secrets
+              # (container image has old sa.yaml without secrets)
+              MANAGED_SA="/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/resources/managed/sa.yaml"
+              if [ -f "$MANAGED_SA" ]; then
+                # Check if sa.yaml is missing secrets (old version)
+                if ! grep -q "secrets:" "$MANAGED_SA"; then
+                  echo "Patching managed ServiceAccount to add secrets..."
+                  # shellcheck disable=SC2016
+                  TRUSTED_ARTIFACTS_SECRET='konflux-ci-konflux-release-trusted-artifacts-pull-secret-${component_name}'
+                  # shellcheck disable=SC2016
+                  {
+                    echo 'secrets:'
+                    echo "  - name: ${TRUSTED_ARTIFACTS_SECRET}"
+                    echo '  - name: push-${component_name}'
+                    echo '  - name: registry-redhat-io-quay-token-secret-${component_name}'
+                    echo 'imagePullSecrets:'
+                    echo '  - name: push-${component_name}'
+                    echo "  - name: ${TRUSTED_ARTIFACTS_SECRET}"
+                  } >> "$MANAGED_SA"
+                  echo "Updated managed ServiceAccount"
+                else
+                  echo "Managed ServiceAccount already has secrets"
+                fi
+              fi
+              
+              # Fix ReleasePlanAdmission mapping to include all components explicitly
+              # (container image has old rpa.yaml with wildcard that doesn't work)
+              MANAGED_RPA="/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/resources/managed/rpa.yaml"
+              if [ -f "$MANAGED_RPA" ]; then
+                # Check if rpa.yaml still has wildcard mapping (old version)
+                # shellcheck disable=SC2016
+                if grep -q 'name: \x27\*\x27' "$MANAGED_RPA" || grep -q 'name: "\*"' "$MANAGED_RPA"; then
+                  echo "Patching managed RPA to replace wildcard with explicit component mappings..."
+                  
+                  # Extract everything before the wildcard component
+                  sed -n '1,/^      components:$/p' "$MANAGED_RPA" > "${MANAGED_RPA}.new"
+                  
+                  # Generate all 200 component mappings
+                  for i in $(seq -f "%03g" 1 200); do
+                    {
+                      echo "        - name: component-${i}"
+                      echo "          repositories:"
+                      echo "            - url: quay.io/redhat-pending/rhtap----rh-advisories-large-test"
+                    } >> "${MANAGED_RPA}.new"
+                  done
+                  
+                  # Append everything after the wildcard component section
+                  sed -n '/^    fileUpdates:$/,$p' "$MANAGED_RPA" >> "${MANAGED_RPA}.new"
+                  
+                  mv "${MANAGED_RPA}.new" "$MANAGED_RPA"
+                  echo "Updated managed RPA with 200 explicit component mappings"
+                else
+                  echo "Managed RPA already has explicit component mappings"
+                fi
+              fi
+              
               # Run test and capture result
               set +e
               "/home/e2e/tests/run-test.sh" "$(params.PIPELINE_TEST_SUITE)"

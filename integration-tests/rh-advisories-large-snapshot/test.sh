@@ -619,6 +619,9 @@ wait_for_releases() {
     export RELEASE_NAME="${large_snapshot_name}-release"
     export RELEASE_NAMESPACE="${tenant_namespace}"
     export RELEASE_NAMES="${RELEASE_NAME}"
+
+    echo "Waiting for release pipeline to complete (this may take 4-8 hours for large snapshots)..." >&2
+    "${SUITE_DIR}/../scripts/wait-for-release.sh"
 }
 
 echo "✅ Large snapshot test functions loaded"

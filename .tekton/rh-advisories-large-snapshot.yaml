@@ -38,7 +38,7 @@ spec:
           "artifacts": {},
           "components": [
             {
-              "containerImage": "quay.io/redhat-user-workloads/rhtap-release-2-tenant/release-service-catalog@sha256:2c7a365076b8b3ae14c25c2a85b9b9655872cd5c4d54603cec8dfe0adb4d87c1",
+              "containerImage": "quay.io/redhat-user-workloads/rhtap-release-2-tenant/release-service-catalog:on-pr-{{revision}}",
               "name": "release-service-catalog",
               "source": {
                 "git": {
