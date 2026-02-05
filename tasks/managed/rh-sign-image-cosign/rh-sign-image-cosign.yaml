@@ -203,7 +203,7 @@ spec:
             backoff1=2
             backoff2=3
             until [ "$attempt" -gt "$(params.retries)" ] ; do # 3 retries by default
-                cosign "$@" && break
+                cosign3 "$@" && break
                 sleep $backoff2
 
                 # Fibbonaci backoff
@@ -232,7 +232,7 @@ spec:
           fi
           found_sigs_file=$(mktemp --suffix sigs)
           expected_sigs_file=$(mktemp --suffix sigs)
-          verify_output=$(run_cosign verify "${COSIGN_REKOR_ARGS[@]}" --key "$PUBLIC_KEY_FILE" "$reference")
+          verify_output=$(run_cosign verify --new-bundle-format=false "${COSIGN_REKOR_ARGS[@]}" --key "$PUBLIC_KEY_FILE" "$reference")
           if [ -z "$verify_output" ]; then
             verify_output="[]"
           fi
@@ -277,14 +277,15 @@ spec:
           else
               COSIGN_REKOR_ARGS+=("--tlog-upload=false")
           fi
-          identities_args=()
+          identities_args=""
           for missing in $(echo "$missing_signatures" | jq -c '.[]|.identity'); do
-            identities_args+=("--sign-container-identity" "${missing}")
+            identities_args="${identities_args},${missing}"
           done
           if [ "${#identities_args[@]}" != 0 ]; then
-            run_cosign -t 3m0s sign "${COSIGN_REKOR_ARGS[@]}" \
+            run_cosign -t 3m0s sign --new-bundle-format=false "${COSIGN_REKOR_ARGS[@]}" \
               --key "$SIGN_KEY" \
-              "${identities_args[@]}" "$reference@$digest"
+              --sign-container-identity "${identities_args}" \
+              "$reference@$digest"
           else
             echopid "Skip signing (${digest})"
           fi
