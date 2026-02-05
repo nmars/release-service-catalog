@@ -36,12 +36,13 @@ if ! [[ "${COMPONENT_COUNT}" =~ ^[1-9][0-9]*$ ]]; then
 fi
 
 # Images to use for components (rotated for variety)
-# Using publicly accessible images to avoid authentication requirements
+# Using publicly accessible images with SHA digests (required by apply-mapping task)
+# Note: These are real, publicly accessible images with stable digests
 declare -a IMAGE_POOL=(
-    "quay.io/centos/centos:stream9"
-    "quay.io/fedora/fedora:latest"
-    "docker.io/library/alpine:latest"
-    "docker.io/library/busybox:latest"
+    "quay.io/centos/centos@sha256:a27fd8080b517143cbbbab9dfb7c8571c40d67d534bbdee55bd6c473f432b177"
+    "quay.io/centos/centos@sha256:a27fd8080b517143cbbbab9dfb7c8571c40d67d534bbdee55bd6c473f432b177"
+    "quay.io/centos/centos@sha256:a27fd8080b517143cbbbab9dfb7c8571c40d67d534bbdee55bd6c473f432b177"
+    "quay.io/centos/centos@sha256:a27fd8080b517143cbbbab9dfb7c8571c40d67d534bbdee55bd6c473f432b177"
 )
 
 echo "Generating large snapshot with ${COMPONENT_COUNT} components..." >&2
