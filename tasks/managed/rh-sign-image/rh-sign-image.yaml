@@ -28,8 +28,8 @@ spec:
       description: InternalRequest timeout
     - name: concurrentLimit
       type: string
-      description: The maximum number of images to be processed at once
-      default: 16
+      description: The maximum number of signing requests to run in parallel
+      default: 8
     - name: pipelineRunUid
       type: string
       description: The uid of the current pipelineRun. Used as a label value when creating internal requests
@@ -150,8 +150,9 @@ spec:
           value: $(params.dataDir)
         - name: sourceDataArtifact
           value: $(params.sourceDataArtifact)
+
     - name: sign-image
-      image: quay.io/konflux-ci/release-service-utils@sha256:f10b4ad888634a7633f76ede29003ce1471aec2b76a7d9e01ad282a3011eb78f
+      image: quay.io/konflux-ci/release-service-utils@sha256:3cb03b14ac9d90ff27070036ce2b50712e65aa285daeb28852254a745bb25dfc
       computeResources:
         limits:
           memory: 4Gi
@@ -173,9 +174,20 @@ spec:
 
         set -x
 
+        # Initialize memory throttling
+        # This file is located at utils/memory-throttle.sh in the release-service-utils image
+        # shellcheck source=/dev/null
+        source memory-throttle.sh
+        # This function is stored in the utils/memory-throttle.sh file
+        log_memory_throttle_status 80
+
         RUNNING_JOBS="\j" # Bash parameter for number of jobs currently running
         CONCURRENT_LIMIT=$(params.concurrentLimit)
+        BURST_SIZE=5
+        STABILIZATION_DELAY=2
         REQUEST_COUNT=0
+        jobs_spawned=0
+        jobs_collected=0
 
         SNAPSHOT_PATH=$(params.dataDir)/$(params.snapshotPath)
         TASK_LABEL="internal-services.appstudio.openshift.io/group-id"
@@ -249,6 +261,7 @@ spec:
         COMPONENTS_LENGTH=$(jq '.components |length' "${SNAPSHOT_PATH}")
         declare -a to_sign_references=()
         declare -a to_sign_digests=()
+        declare -a to_sign_keys=()
 
         # Arrays to store information for parallel processing
         declare -a find_signatures_files=()
@@ -272,6 +285,7 @@ spec:
               nested_digests=$(jq -r '[.manifests[].digest] | join(" ")' <<< "$RAW_OUTPUT")
               manifest_digests="$manifest_digests $nested_digests"
             fi
+            echo "MANIFEST DIGESTS: ${manifest_digests}"
 
             sourceContainerDigest=
             # Push source container if the component has pushSourceContainer: true or if the
@@ -311,49 +325,75 @@ spec:
               # Store component data for later processing
               component_data+=("${i}|${repository}|${TAGS}|${manifest_digests}|${sourceContainerDigest}|${rh_registry_repo}|${registry_access_repo}")
 
-              # Start find_signatures jobs with concurrency limit for manifest digests
+              # Start find_signatures jobs in parallel for manifest digests
               for manifest_digest in $manifest_digests; do
+                # This function is stored in the utils/memory-throttle.sh file
+                # Wait for memory and concurrent limit
+                wait_for_memory 80
                 while (( ${RUNNING_JOBS@P} >= "$CONCURRENT_LIMIT" )); do
                   wait -n || FIND_SIGNATURES_SUCCESS=false
+                  jobs_collected=$((jobs_collected + 1))
                 done
+
+                echo "Starting find_signatures job for manifest digest: ${manifest_digest}"
+                digest_filename="${manifest_digest//:/_}"
                 ((++FIND_SIGNATURES_JOB_COUNT))
-                # Use hex digest without sha256: prefix for filename consistency
-                digest_filename="${manifest_digest#sha256:}"
                 find_signatures_files+=("${digest_filename}")
                 find_signatures --pyxis-graphql-api "${PYXIS_GRAPHQL_URL}" \
-                  --manifest_digest "${manifest_digest}" \
-                  --repository "${repository}" \
-                  --output_file "/tmp/${manifest_digest}" \
-                  > "/tmp/find_sig_${digest_filename}.out" \
-                  2> "/tmp/find_sig_${digest_filename}.err" &
+                --manifest_digest "${manifest_digest}" \
+                --repository "${repository}" \
+                --output_file "/tmp/${manifest_digest}" \
+                > "/tmp/find_sig_${digest_filename}.out" \
+                2> "/tmp/find_sig_${digest_filename}.err" &
+                find_signatures_jobs+=($!)
+                jobs_spawned=$((jobs_spawned + 1))
+
+                # Allow memory usage to stabilize every BURST_SIZE spawns.
+                if (( jobs_spawned % BURST_SIZE == 0 )); then
+                  sleep $STABILIZATION_DELAY
+                fi
               done
 
               # Start find_signatures job for source container digest if it exists
               if [ "${sourceContainerDigest}" != "" ] ; then
+                # This function is stored in the utils/memory-throttle.sh file
+                # Wait for memory and concurrent limit
+                wait_for_memory 80
                 while (( ${RUNNING_JOBS@P} >= "$CONCURRENT_LIMIT" )); do
                   wait -n || FIND_SIGNATURES_SUCCESS=false
+                  jobs_collected=$((jobs_collected + 1))
                 done
+
+                echo "Starting find_signatures job for source container digest: ${sourceContainerDigest}"
+                digest_filename="${manifest_digest//:/_}"
                 ((++FIND_SIGNATURES_JOB_COUNT))
-                # Use hex digest without sha256: prefix for filename consistency
-                digest_filename="${sourceContainerDigest#sha256:}"
                 find_signatures_files+=("${digest_filename}")
                 find_signatures --pyxis-graphql-api "${PYXIS_GRAPHQL_URL}" \
-                  --manifest_digest "${sourceContainerDigest}" \
-                  --repository "${repository}" \
-                  --output_file "/tmp/${sourceContainerDigest}" \
-                  > "/tmp/find_sig_${digest_filename}.out" \
-                  2> "/tmp/find_sig_${digest_filename}.err" &
+                --manifest_digest "${sourceContainerDigest}" \
+                --repository "${repository}" \
+                --output_file "/tmp/${sourceContainerDigest}" \
+                > "/tmp/find_sig_${digest_filename}.out" \
+                2> "/tmp/find_sig_${digest_filename}.err" &
+                find_signatures_jobs+=($!)
+                jobs_spawned=$((jobs_spawned + 1))
+
+                # Allow memory usage to stabilize every BURST_SIZE spawns
+                if (( jobs_spawned % BURST_SIZE == 0 )); then
+                  sleep $STABILIZATION_DELAY
+                fi
               fi
 
             done
         done
 
-        # Wait for all find_signatures jobs to complete
+        # Wait for all find_signatures jobs to complete - use counter to collect all exit codes
+        # in case processes finished during a burst sleep
         echo "Waiting for ${FIND_SIGNATURES_JOB_COUNT} find_signatures jobs to complete..."
-        while (( ${RUNNING_JOBS@P} > 0 )); do
+        while (( jobs_collected < jobs_spawned )); do
           wait -n || FIND_SIGNATURES_SUCCESS=false
+          jobs_collected=$((jobs_collected + 1))
         done
-        echo "All find_signatures jobs completed"
+        echo "All find_signatures jobs completed (spawned: $jobs_spawned, collected: $jobs_collected)"
 
         # Print outputs and errors for each find_signatures job
         for digest_filename in "${find_signatures_files[@]}"; do
@@ -369,11 +409,18 @@ spec:
                 echo
             fi
         done
-
         if [ "$FIND_SIGNATURES_SUCCESS" != true ]; then
             echo "One or more find_signatures jobs failed. Please check the logs above for details."
             exit 1
         fi
+
+        # Gather all signing keys
+        jqquery='.data|if has ("SIG_KEY_NAMES")
+        then (.SIG_KEY_NAMES|split(",")|.[]|gsub("^\\s+|\\s+$";"")) else .SIG_KEY_NAME end'
+
+        config_map_name=$(jq -r '.sign.configMapName // "signing-config-map"' "${DATA_FILE}")
+        configMapJson=$(kubectl get "cm/${config_map_name:?}" -ojson)
+        SIG_KEY_NAMES=$(jq -er "$jqquery" <<< "${configMapJson}")
 
         # Second pass: process the results now that all find_signatures calls are complete
         for component_info in "${component_data[@]}"; do
@@ -396,67 +443,167 @@ spec:
               REGISTRY_REFERENCES+=("${registry_access_repo}")
             fi
 
-            for manifest_digest in $manifest_digests; do
-              # Iterate over both rh-registry-repo and registry-access-repo
-              for registry_reference in "${REGISTRY_REFERENCES[@]}"; do
+            for sig_key in ${SIG_KEY_NAMES}; do
+              for manifest_digest in $manifest_digests; do
+                # Iterate over both rh-registry-repo and registry-access-repo
+                for registry_reference in "${REGISTRY_REFERENCES[@]}"; do
 
-                for tag in ${TAGS}; do
+                  for tag in ${TAGS}; do
 
-                  if ! grep -q "^${registry_reference}:${tag}$" "/tmp/${manifest_digest}" ; then
-                    to_sign_references+=("${registry_reference}:${tag}")
-                    to_sign_digests+=("${manifest_digest}")
-                  else
-                    echo "Signature already exists for:"
-                    echo "- reference=${registry_reference}:${tag}"
-                    echo "- manifest_digest=${manifest_digest}"
-                  fi
+                    if ! grep -q "^${registry_reference}:${tag} ${sig_key}$" "/tmp/${manifest_digest}" ; then
+                      to_sign_references+=("${registry_reference}:${tag}")
+                      to_sign_digests+=("${manifest_digest}")
+                      to_sign_keys+=("${sig_key}")
+                    else
+                      echo "Signature already exists for:"
+                      echo "- reference=${registry_reference}:${tag}"
+                      echo "- manifest_digest=${manifest_digest}"
+                    fi
 
+                  done
                 done
               done
             done
 
-            if [ "${sourceContainerDigest}" != "" ] ; then
-                for registry_reference in "${REGISTRY_REFERENCES[@]}"; do
+            for sig_key in ${SIG_KEY_NAMES}; do
+              if [ "${sourceContainerDigest}" != "" ] ; then
 
-                  for tag in ${TAGS}; do
-                    sourceTag=${tag}-source
+                  for registry_reference in "${REGISTRY_REFERENCES[@]}"; do
 
-                    if ! grep -q "^${registry_reference}:${sourceTag}$" "/tmp/${sourceContainerDigest}" ; then
-                      to_sign_references+=("${registry_reference}:${sourceTag}")
-                      to_sign_digests+=("${sourceContainerDigest}")
-                    else
-                      echo "Signature already exists for:"
-                      echo "- reference=${registry_reference}:${sourceTag}"
-                      echo "- manifest_digest=${sourceContainerDigest}"
-                    fi
+                    for tag in ${TAGS}; do
+                      sourceTag=${tag}-source
+                      expected="^${registry_reference}:${sourceTag} ${sig_key}$"
+                      if ! grep -q "$expected" "/tmp/${sourceContainerDigest}" ; then
+                        to_sign_references+=("${registry_reference}:${sourceTag}")
+                        to_sign_digests+=("${sourceContainerDigest}")
+                        to_sign_keys+=("${sig_key}")
+                      else
+                        echo "Signature already exists for:"
+                        echo "- reference=${registry_reference}:${sourceTag}"
+                        echo "- manifest_digest=${sourceContainerDigest}"
+                      fi
+                    done
                   done
-                done
-            fi
+              fi
+            done
         done
 
-        references_batch=""
-        digests_batch=""
-
-        # Process to sign arrays in batches
+        declare -A ref_dig_to_keys_map=()
+        declare -A keys_to_ref_dig_map=()
+        #
+        # For each reference-digest pair, build a map of signing keys which need to be signed
         for i in "${!to_sign_references[@]}"; do
-          new_references_batch="${references_batch}${to_sign_references[$i]} "
-          new_digests_batch="${digests_batch}${to_sign_digests[$i]} "
+          ref="${to_sign_references[$i]}"
+          dig="${to_sign_digests[$i]}"
+          key="${to_sign_keys[$i]}"
+          pair="${ref}|${dig}"
+          # if key is not already in the list for this pair, add it
+          if [[ ",${ref_dig_to_keys_map[$pair]-}," != *",$key,"* ]]; then
+            if [[ -n "${ref_dig_to_keys_map[$pair]-}" ]]; then
+              ref_dig_to_keys_map[$pair]+=",$key"
+            else
+              ref_dig_to_keys_map[$pair]="${key}"
+            fi
+          fi
+        done
 
-          # if batches are too big, send the request
-          if [[ ${#new_references_batch} -gt $BATCH_LIMIT || ${#new_digests_batch} -gt $BATCH_LIMIT ]]; then
+        # Create mapping of keysets to reference-digest pairs
+        for pair in "${!ref_dig_to_keys_map[@]}"; do
+          # sort keys
+          IFS=',' read -r -a karr <<< "${ref_dig_to_keys_map[$pair]}"
+          mapfile -t sorted_keys < <(IFS=' ' printf '%s\n' "${karr[@]}" | sort)
+          keyset="${sorted_keys[*]}"
+          keyset="${keyset//$' '/,}"  # join with commas
 
+          if [[ -n "${keys_to_ref_dig_map[$keyset]-}" ]]; then
+            keys_to_ref_dig_map["$keyset"]+="#${pair}"
+          else
+            keys_to_ref_dig_map["$keyset"]="${pair}"
+          fi
+        done
+
+        # Reset counters for signing phase
+        jobs_spawned=0
+        jobs_collected=0
+
+        for keyset in "${!keys_to_ref_dig_map[@]}"; do
+
+          references_batch=""
+          digests_batch=""
+
+          IFS='#' read -r -a pairs <<< "${keys_to_ref_dig_map[$keyset]}"
+          for pair in "${pairs[@]}"; do
+            IFS="|" read -r reference digest <<< "$pair"
+
+            keyset_spaces="${keyset//,/ }"  # replace , with spaces
+
+            new_references_batch="${references_batch}${reference} "
+            new_digests_batch="${digests_batch}${digest} "
+
+            # This function is stored in the utils/memory-throttle.sh file
+            # Wait for memory and concurrent limit
+            wait_for_memory 80
             while (( ${RUNNING_JOBS@P} >= "$CONCURRENT_LIMIT" )); do
               wait -n
+              jobs_collected=$((jobs_collected + 1))
             done
 
-            echo "Creating ${requestType} to sign images: ${references_batch}"
-            echo "- digests: ${digests_batch[*]}"
+            if [[ ${#new_references_batch} -gt $BATCH_LIMIT || ${#new_digests_batch} -gt $BATCH_LIMIT ]]; then
+              echo "🟢 Creating ${requestType} to sign images: ${references_batch}"
+              echo "🟢 - digests: ${digests_batch[*]}"
+              echo "🟢 - keys: ${keyset_spaces}"
+
+              ${requestType} \
+                --pipeline "${request}" \
+                -p pipeline_image="${pipeline_image}" \
+                -p references="${references_batch}" \
+                -p signing_key_names="${keyset_spaces}" \
+                -p manifest_digests="${digests_batch}" \
+                -p config_map_name="${config_map_name}" \
+                -p requester="$(params.requester)" \
+                -p taskGitUrl="$(params.taskGitUrl)" \
+                -p taskGitRevision="$(params.taskGitRevision)" \
+                -l ${TASK_LABEL}="${TASK_ID}" \
+                -l ${PIPELINERUN_LABEL}="$(params.pipelineRunUid)" \
+                -t "$(params.requestTimeout)" --pipeline-timeout "0h30m0s" --task-timeout "0h25m0s" \
+                "${EXTRA_ARGS[@]}" -s true &
+                ((++REQUEST_COUNT))
+                echo "Request Count: $REQUEST_COUNT"
+                jobs_spawned=$((jobs_spawned + 1))
+
+                # Allow memory usage to stabilize every BURST_SIZE spawns
+                if (( jobs_spawned % BURST_SIZE == 0 )); then
+                  sleep $STABILIZATION_DELAY
+                fi
+
+                references_batch="${reference} "
+                digests_batch="${digest} "
+            else
+              # if batches are still small enough, add the values to the batches
+              references_batch="${new_references_batch}"
+              digests_batch="${new_digests_batch}"
+            fi
+
+          done
+          if [[ ${#references_batch} -gt 0 ]]; then
+            # This function is stored in the utils/memory-throttle.sh file
+            # Wait for memory and concurrent limit
+            wait_for_memory 80
+            while (( ${RUNNING_JOBS@P} >= "$CONCURRENT_LIMIT" )); do
+              wait -n
+              jobs_collected=$((jobs_collected + 1))
+            done
+
+            echo "🟢 Creating ${requestType} to sign images: ${references_batch}"
+            echo "🟢 - digests: ${digests_batch[*]}"
+            echo "🟢 - keys: ${keyset_spaces}"
 
             ${requestType} \
               --pipeline "${request}" \
               -p pipeline_image="${pipeline_image}" \
-              -p references="${references_batch}" \
-              -p manifest_digests="${digests_batch}" \
+              -p references="${references_batch[*]}" \
+              -p signing_key_names="${keyset_spaces}" \
+              -p manifest_digests="${digests_batch[*]}" \
               -p config_map_name="${config_map_name}" \
               -p requester="$(params.requester)" \
               -p taskGitUrl="$(params.taskGitUrl)" \
@@ -467,6 +614,12 @@ spec:
               "${EXTRA_ARGS[@]}" -s true &
               ((++REQUEST_COUNT))
               echo "Request Count: $REQUEST_COUNT"
+              jobs_spawned=$((jobs_spawned + 1))
+
+            # Allow memory usage to stabilize every BURST_SIZE spawns
+            if (( jobs_spawned % BURST_SIZE == 0 )); then
+              sleep $STABILIZATION_DELAY
+            fi
 
             # next batches consist of values which didn't fit in the previous batches
             references_batch="${to_sign_references[$i]} "
@@ -475,19 +628,12 @@ spec:
             # if batches are still small enough, add the values to the batches
             references_batch="${new_references_batch}"
             digests_batch="${new_digests_batch}"
-          fi
-        done
-
-        # Process the last batch
-        if [[ ${#references_batch} -gt 0 ]]; then
-          while (( ${RUNNING_JOBS@P} >= "$CONCURRENT_LIMIT" )); do
-            wait -n
-          done
 
           ${requestType} \
             --pipeline "${request}" \
             -p pipeline_image="${pipeline_image}" \
             -p references="${references_batch[*]}" \
+            -p signing_key_names="${keyset_spaces}" \
             -p manifest_digests="${digests_batch[*]}" \
             -p config_map_name="${config_map_name}" \
             -p requester="$(params.requester)" \
@@ -497,14 +643,18 @@ spec:
             -l ${PIPELINERUN_LABEL}="$(params.pipelineRunUid)" \
             -t "$(params.requestTimeout)" --pipeline-timeout "0h30m0s" --task-timeout "0h25m0s" \
             "${EXTRA_ARGS[@]}" -s true &
-        fi
-
-        echo "Waiting for remaining processes to finish..."
-        while (( ${RUNNING_JOBS@P} > 0 )); do
-          wait -n
+          jobs_spawned=$((jobs_spawned + 1))
+          fi
         done
 
+        echo "Waiting for remaining processes to finish..."
+        # Use counter to collect all exit codes in case processes finished during a burst sleep
+        while (( jobs_collected < jobs_spawned )); do
+          wait -n
+          jobs_collected=$((jobs_collected + 1))
+        done
         echo "done"
+
     - name: create-trusted-artifact
       computeResources:
         limits:

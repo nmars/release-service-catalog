@@ -3,7 +3,9 @@ set -eux
 
 # mocks to be injected into task step scripts
 function internal-request() {
-  printf '%s\n' "$*" >> $(params.dataDir)/mock_internal-request.txt
+  # Use WORKDIR env var instead of $(params.dataDir) for subshell compatibility
+  local WORKDIR="${WORKDIR:-/var/workdir/release}"
+  printf '%s\n' "$*" >> "$WORKDIR/mock_internal-request.txt"
 
   # Extract unique identifier from the task context that we can use for labeling
   PIPELINE_UID=""
@@ -15,17 +17,46 @@ function internal-request() {
   done
 
   # set to async and capture output
-  /home/utils/internal-request "$@" -s false | tee $(params.dataDir)/ir-output-${PIPELINE_UID:-default}.tmp
-
-  sleep 1
+  # Use a unique temp file for each internal-request call to avoid race conditions in parallel execution
+  local ir_output_file
+  ir_output_file="$WORKDIR/ir-output-${PIPELINE_UID:-default}-$$.tmp"
   
-  # Extract the IR name from the captured output specific to this pipeline
-  IR_NAME=$(awk -F"'" '/created/ { print $2 }' $(params.dataDir)/ir-output-${PIPELINE_UID:-default}.tmp)
+  # Count existing IRs before creating new one to track which one we created
+  local ir_count_before=0
+  if [ -n "$PIPELINE_UID" ]; then
+    ir_count_before=$(kubectl get internalrequest \
+      -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}" \
+      --no-headers 2>/dev/null | wc -l)
+  fi
+  
+  /home/utils/internal-request "$@" -s false | tee "$ir_output_file"
+  
+  # Extract the IR name from the captured output
+  IR_NAME=$(awk -F"'" '/created/ { print $2 }' "$ir_output_file")
   
   if [ -z "$IR_NAME" ]; then
-      # Fallback: try to find IR with matching pipeline UID label
+      # Poll for the new IR to appear (wait up to 10 seconds)
       if [ -n "$PIPELINE_UID" ]; then
-        IR_NAME=$(kubectl get internalrequest -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}" --no-headers -o custom-columns=":metadata.name" --sort-by=.metadata.creationTimestamp | tail -1)
+        echo "Waiting for InternalRequest to be created for pipeline UID: ${PIPELINE_UID}..."
+        for attempt in {1..20}; do
+          sleep 0.5
+          local ir_count_after
+          ir_count_after=$(kubectl get internalrequest \
+            -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}" \
+            --no-headers 2>/dev/null | wc -l)
+          
+          if [ "$ir_count_after" -gt "$ir_count_before" ]; then
+            # New IR appeared, get the most recent one for this pipeline
+            IR_NAME=$(kubectl get internalrequest \
+              -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}" \
+              --no-headers -o custom-columns=":metadata.name" \
+              --sort-by=.metadata.creationTimestamp 2>/dev/null | tail -1)
+            if [ -n "$IR_NAME" ]; then
+              echo "Found InternalRequest: $IR_NAME (attempt $attempt)"
+              break
+            fi
+          fi
+        done
       fi
       
       # Final fallback to the original method
@@ -43,17 +74,36 @@ function internal-request() {
       exit 1
   fi
 
-  if [[ "$*" == *"fbcFragments="*"fail.io"* ]]; then
-      set_ir_status $IR_NAME 1
+  # Check if fbcFragments contains the fail.io pattern
+  # The parameter comes in format: -p fbcFragments=["fail.io/image0@sha256:0000"]
+  # Any image with "fail.io" in the registry/path will trigger a failure
+  if [[ "$*" =~ fbcFragments=.*fail\.io ]]; then
+      set_ir_status "$IR_NAME" 1
   else
-      set_ir_status $IR_NAME 0
+      set_ir_status "$IR_NAME" 0
   fi
 }
 
 function set_ir_status() {
     NAME=$1
     EXITCODE=$2
-    PATCH_FILE=$(params.dataDir)/${NAME}-patch.json
+    local WORKDIR="${WORKDIR:-/var/workdir/release}"
+    PATCH_FILE="$WORKDIR/${NAME}-patch.json"
+    
+    # Wait for the IR to actually exist before trying to patch it
+    echo "Waiting for InternalRequest $NAME to be created..."
+    for wait_attempt in {1..30}; do
+      if kubectl get internalrequest "$NAME" &>/dev/null; then
+        echo "InternalRequest $NAME found (attempt $wait_attempt)"
+        break
+      fi
+      if [ $wait_attempt -eq 30 ]; then
+        echo "ERROR: InternalRequest $NAME not found after 15 seconds"
+        kubectl get internalrequest --no-headers
+        return 1
+      fi
+      sleep 0.5
+    done
 
     # Determine condition status based on exit code - matches internal-services behavior
     if [ "${EXITCODE}" -eq 0 ]; then
@@ -127,14 +177,15 @@ EOF
 }
 
 function date() {
-  echo $* >> $(params.dataDir)/mock_date.txt
+  local WORKDIR="${WORKDIR:-/var/workdir/release}"
+  echo $* >> "$WORKDIR/mock_date.txt"
 
   case "$*" in
       "+%Y-%m-%dT%H:%M:%SZ")
-          echo "2023-10-10T15:00:00Z" |tee $(params.dataDir)/mock_date_iso_format.txt
+          echo "2023-10-10T15:00:00Z" |tee "$WORKDIR/mock_date_iso_format.txt"
           ;;
       "+%s")
-          echo "1696946200" | tee $(params.dataDir)/mock_date_epoch.txt
+          echo "1696946200" | tee "$WORKDIR/mock_date_epoch.txt"
           ;;
       "-u +%Hh%Mm%Ss -d @"*)
           /usr/bin/date $*
@@ -148,6 +199,9 @@ function date() {
           ;;
   esac
 }
+
+# Set WORKDIR for subshell compatibility (replaces $(params.dataDir) which doesn't expand in subshells)
+export WORKDIR="$(params.dataDir)"
 
 # Export functions so they're available to the task scripts
 export -f internal-request
